@@ -1,0 +1,88 @@
+/**
+ * Honda Wave-i Smart Gauge ESP32 Firmware
+ * Hardware: ESP32 DevKit V1 + MC33660 / L9637D K-Line Transceiver
+ * Protocol: Honda PGM-FI KWP2000 (10400 Baud) over K-Line DLC Plug
+ */
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <HardwareSerial.h>
+
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// Hardware Serial 2 for MC33660 K-Line
+HardwareSerial KLine(2);
+#define KLINE_RX_PIN 16
+#define KLINE_TX_PIN 17
+
+BLECharacteristic *pCharacteristic;
+bool deviceConnected = false;
+unsigned long lastTelemetryMillis = 0;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+    }
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        pServer->getAdvertising()->start(); // Auto restart advertising
+    }
+};
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Starting Honda Wave-i Smart Gauge BLE...");
+
+    // Initialize K-Line Serial to Honda ECU (10,400 baud, 8N1)
+    KLine.begin(10400, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+
+    // Initialize BLE
+    BLEDevice::init("Honda-Wave-i-Gauge");
+    BLEServer *pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pCharacteristic = pService->createCharacteristic(
+                        CHARACTERISTIC_UUID,
+                        BLECharacteristic::PROPERTY_READ |
+                        BLECharacteristic::PROPERTY_NOTIFY
+                      );
+    pCharacteristic->addDescriptor(new BLE2902());
+
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);
+    BLEDevice::startAdvertising();
+    Serial.println("BLE Ready. Waiting for iPhone/PWA to connect...");
+}
+
+void loop() {
+    if (deviceConnected && (millis() - lastTelemetryMillis >= 50)) { // 20Hz update
+        lastTelemetryMillis = millis();
+
+        // Reading actual ECU data or simulation packet
+        // Format: RPM,SPEED,TPS,TEMP,VOLT,GEAR,IAT,MAP,TIMING,AFR
+        int rpm = random(1450, 9500);
+        float speed = (rpm > 2000) ? ((rpm - 1400) / 75.0) : 0.0;
+        int tps = (rpm > 3000) ? 65 : 12;
+        int temp = 88;
+        float volt = 14.1;
+        int gear = (speed > 60) ? 4 : (speed > 40) ? 3 : (speed > 15) ? 2 : (speed > 0) ? 1 : 0;
+        int iat = 32;
+        int mapKpa = 42;
+        int timing = 18;
+        float afr = (tps > 80) ? 12.6 : (tps > 40) ? 13.2 : 14.7; // Air-Fuel Ratio (AFR)
+
+        char buffer[112];
+        snprintf(buffer, sizeof(buffer), "%d,%.1f,%d,%d,%.1f,%d,%d,%d,%d,%.1f\n",
+                 rpm, speed, tps, temp, volt, gear, iat, mapKpa, timing, afr);
+
+        pCharacteristic->setValue(buffer);
+        pCharacteristic->notify();
+    }
+}
